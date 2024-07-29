@@ -1,0 +1,6 @@
+{
+    "files.associations": {
+        "r_api.h": "c",
+        "pulse_slicer.h": "c"
+    }
+}

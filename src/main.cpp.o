@@ -1,0 +1,115 @@
+// These examples are from the Electronics Cookbook by Simon Monk
+//https://github.com/LSatan/SmartRC-CC1101-Driver-Lib
+// mod by Little_S@tan
+#include <RadioLib.h>
+#include <ELECHOUSE_CC1101_SRC_DRV.h>
+
+int gdo0;
+
+static TaskHandle_t rtl_433_ReceiverHandle;
+
+#define rtl_433_ReceiverTask_Stack    2048
+#define rtl_433_ReceiverTask_Priority 2
+#define rtl_433_ReceiverTask_Core     0
+
+//CC1101 radio = new Module(5, 4, RADIOLIB_NC, 2);
+
+
+void rtl_433_ReceiverTask(void* pvParameters)
+{
+}
+
+byte buffer[512] = {0};
+bool received = false;
+
+void rtl_433_ReceiverISR()
+{
+  received = true;
+}
+
+void setup()
+{
+
+#ifdef ESP32
+gdo0 = 4;  // for esp32! GDO0 on GPIO pin 2.
+#elif ESP8266
+gdo0 = 5;  // for esp8266! GDO0 on pin 5 = D1.
+#else
+gdo0 = 6;  // for Arduino! GDO0 on pin 6.
+#endif 
+  
+    Serial.begin(9600);
+    
+    ELECHOUSE_cc1101.Init();
+    if (!ELECHOUSE_cc1101.getCC1101())
+    {
+        Serial.println("CC1101 not detected. Please check wiring.");
+        return;
+    }
+
+    ELECHOUSE_cc1101.setGDO0(4);
+    ELECHOUSE_cc1101.setMHZ(433.92);
+    ELECHOUSE_cc1101.setDeviation(5);
+    
+    ELECHOUSE_cc1101.setModulation(2);
+    ELECHOUSE_cc1101.setManchester(true);
+    // ELECHOUSE_cc1101.setSyncMode(7); // sync word 30/32 bits detected
+    // ELECHOUSE_cc1101.setSyncWord(0xAD, 0x12);
+
+    ELECHOUSE_cc1101.setCrc(false);
+    ELECHOUSE_cc1101.setCRC_AF(false);
+    
+    ELECHOUSE_cc1101.setDRate(4.8);// ELECHOUSE_cc1101.setDRate(17.24);
+    ELECHOUSE_cc1101.setRxBW(58); // ELECHOUSE_cc1101.setRxBW(270);
+    ELECHOUSE_cc1101.setPacketLength(0);
+    ELECHOUSE_cc1101.setDcFilterOff(false);
+    ELECHOUSE_cc1101.SetRx();
+        
+    // state = radio.SPIsetRegValue(RADIOLIB_CC1101_REG_AGCCTRL2, 0xc7);
+    // RADIOLIB_STATE(state, "set AGCCTRL2");
+
+    // state = radio.SPIsetRegValue(RADIOLIB_CC1101_REG_MDMCFG3, 0x93); // Data rate
+    // RADIOLIB_STATE(state, "set MDMCFG3");
+
+    // state = radio.SPIsetRegValue(RADIOLIB_CC1101_REG_MDMCFG4, 0x07); // Bandwidth
+    // RADIOLIB_STATE(state, "set MDMCFG4");
+    
+    // register the interrupt handler
+    attachInterrupt(4, rtl_433_ReceiverISR, RISING);
+    
+    //state = radio.receiveDirectAsync();
+
+  //   if (!rtl_433_ReceiverHandle) {
+  //   xTaskCreatePinnedToCore(
+  //       rtl_433_ReceiverTask, /* Function to implement the task */
+  //       "rtl_433_ReceiverTask", /* Name of the task */
+  //       rtl_433_ReceiverTask_Stack, /* Stack size in bytes */
+  //       NULL, /* Task input parameter */
+  //       rtl_433_ReceiverTask_Priority, /* Priority of the task (set lower than core task) */
+  //       &rtl_433_ReceiverHandle, /* Task handle. */
+  //       rtl_433_ReceiverTask_Core); /* Core where the task should run */
+  // }
+
+    Serial.println("Rx Mode");
+}
+
+void loop() {
+  if (received) {
+    Serial.println("Packet Received");
+    int length = ELECHOUSE_cc1101.ReceiveData(buffer);
+      Serial.print("Received Length: ");
+      Serial.println(length);
+
+    if (ELECHOUSE_cc1101.CheckReceiveFlag()) {
+      bool b1 = ELECHOUSE_cc1101.CheckReceiveFlag();
+      bool b2 = ELECHOUSE_cc1101.CheckRxFifo(0);
+  
+      Serial.print("Received Flag: ");
+      Serial.println(b1);
+      Serial.print("Received FIFO: ");
+      Serial.println(b2);
+    }
+
+    received = false;
+  }
+}
