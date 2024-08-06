@@ -140,7 +140,9 @@ typedef struct r_cfg {
   int bufferSize;      // size of message buffer for message callback
 
   uint8_t *dataBuffer; // data buffer for message callback
+  int receivedDataSize;
   int dataBufferSize;  // size of data buffer for message callback
+  
   /**
    * callback to controlling program to be executed when a message is received.
    * Object point passed is a pointer to a JSON formatted message for

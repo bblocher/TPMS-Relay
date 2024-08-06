@@ -982,7 +982,7 @@ void data_acquired_handler(r_device* r_dev, data_t* data) {
 
   // callback to external function that receives message from device (
   // rtl_433_ESPCallBack )
-  (cfg->callback)(cfg->messageBuffer, cfg->dataBuffer, cfg->dataBufferSize);
+  (cfg->callback)(cfg->messageBuffer, cfg->dataBuffer, cfg->receivedDataSize);
   data_free(data);
 }
 

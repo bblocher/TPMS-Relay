@@ -271,6 +271,8 @@ public:
   void setOOKThreshold(int);
 #endif
 
+  static void setRXSettings();
+  
   /**
    * Initialise receiver
    *

@@ -82,7 +82,6 @@ void rtlSetup() {
 
 #ifndef MY_DEVICES
     // This is a generated fragment from tools/update_rtl_433_devices.sh
-
     if (rtl_433_ESP::ookModulation) {
       memcpy(&cfg->devices[0], &abmt, sizeof(r_device));
       memcpy(&cfg->devices[1], &acurite_rain_896, sizeof(r_device));
@@ -327,7 +326,7 @@ void rtlSetup() {
     // end of fragment
 
 #else
-    memcpy(&cfg->devices[0], &lacrosse_tx141x, sizeof(r_device));
+    memcpy(&cfg->devices[0], &schrader_EG53MA4, sizeof(r_device));
 #endif
 
 #ifdef RTL_FLEX
@@ -481,7 +480,7 @@ void rtl_433_DecoderTask(void* pvParameters) {
     int events = 0;
 
     if (rtl_433_ESP::ookModulation) {
-      events = run_ook_demods(&cfg->demod->r_devs, rtl_pulses, cfg->dataBuffer, &cfg->dataBufferSize);
+      events = run_ook_demods(&cfg->demod->r_devs, rtl_pulses, cfg->dataBuffer, &cfg->receivedDataSize);
     } else {
       events = run_fsk_demods(&cfg->demod->r_devs, rtl_pulses);
     }
@@ -530,7 +529,12 @@ void rtl_433_DecoderTask(void* pvParameters) {
 
       r_cfg_t* cfg = &g_cfg;
       data_print_jsons(data, cfg->messageBuffer, cfg->bufferSize);
-      (cfg->callback)(cfg->messageBuffer);
+      (cfg->callback)(cfg->messageBuffer, cfg->dataBuffer, cfg->receivedDataSize);
+
+      // Reset the data buffer
+      memset(cfg->dataBuffer, 0, cfg->receivedDataSize);
+      cfg->receivedDataSize = 0;
+
       data_free(data);
 
 #endif
@@ -577,4 +581,8 @@ void processSignal(pulse_data_t* rtl_pulses) {
   } else {
     // logprintfLn(LOG_DEBUG, "processSignal() signal placed on rtl_433_Queue");
   }
+}
+
+void flushQueue() {
+  xQueueReset(rtl_433_Queue);
 }

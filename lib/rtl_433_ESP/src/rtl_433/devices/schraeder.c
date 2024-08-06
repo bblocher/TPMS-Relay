@@ -32,10 +32,15 @@ Packet payload: 1 sync nibble and 8 bytes data, 17 nibbles:
 
 #include "decoder.h"
 
+#define SCHRAEDER_PACKET_BIT_LENGTH 68
+#define SCHRAEDER_PACKET_BYTE_LENGTH 9
+
 static int schraeder_decode_with_copy(r_device *decoder, bitbuffer_t *bitbuffer, uint8_t* dataBuffer, int* pBufferSize)
 {
     data_t *data;
     uint8_t b[8];
+    u_int8_t fullBuffer[SCHRAEDER_PACKET_BYTE_LENGTH];
+
     int serial_id;
     char id_str[9];
     int flags;
@@ -44,8 +49,11 @@ static int schraeder_decode_with_copy(r_device *decoder, bitbuffer_t *bitbuffer,
     int temperature; // deg C
 
     // Reject wrong amount of bits
-    if (bitbuffer->bits_per_row[0] != 68)
+    if (bitbuffer->bits_per_row[0] != SCHRAEDER_PACKET_BIT_LENGTH)
         return DECODE_ABORT_LENGTH;
+
+    // Extract the buffer
+    bitbuffer_extract_bytes(bitbuffer, 0, 0, fullBuffer, SCHRAEDER_PACKET_BIT_LENGTH);
 
     // Shift the buffer 4 bits to remove the sync bits
     bitbuffer_extract_bytes(bitbuffer, 0, 4, b, 64);
@@ -58,8 +66,8 @@ static int schraeder_decode_with_copy(r_device *decoder, bitbuffer_t *bitbuffer,
     // Copy the data to the buffer if not null
     if (dataBuffer)
     {
-        *pBufferSize = 8;
-        memcpy(dataBuffer, b, 8);
+        *pBufferSize = SCHRAEDER_PACKET_BYTE_LENGTH;
+        memcpy(dataBuffer, fullBuffer, SCHRAEDER_PACKET_BYTE_LENGTH);
     }
 
     // Get data
@@ -99,7 +107,7 @@ Also Schrader PA66-GF35 (OPEL OEM 13348393) TPMS Sensor.
 
 Probable packet payload:
 
-    SSSSSSSSSS ???????? IIIIII TT PP CC
+    SS SS SS SS SS ?? ?? ?? ?? II II II PP TT CC
 
 - S: sync
 - ?: might contain the preamble, status and battery flags
@@ -108,10 +116,18 @@ Probable packet payload:
 - T: temperature, degrees Fahrenheit
 - C: checksum, sum of byte data modulo 256
 */
+
+#define EG53MA4_PACKET_MIN_BIT_LENGTH 80
+#define EG53MA4_PACKET_MIN_BYTE_LENGTH 10
+#define EG53MA4_PACKET_SYNC_LENGTH 5
+#define MFG_BIT_H 0x4c
+#define MFG_BIT_L 0x90
+#define BUFFER_SIZE 255
+
 static int schrader_EG53MA4_decode_with_copy(r_device *decoder, bitbuffer_t *bitbuffer, uint8_t* dataBuffer, int* pBufferSize)
 {
     data_t *data;
-    uint8_t b[10];
+    uint8_t b[BUFFER_SIZE];
     int serial_id;
     char id_str[9];
     unsigned flags;
@@ -120,12 +136,61 @@ static int schrader_EG53MA4_decode_with_copy(r_device *decoder, bitbuffer_t *bit
     int temperature; // degree Fahrenheit
     int checksum;
 
-    // Check for incorrect number of bits received
-    if (bitbuffer->bits_per_row[0] != 120)
+    // Check for bits received
+    int bitCount = bitbuffer->bits_per_row[0];
+
+    // Reject wrong amount of bits
+    if (bitCount < EG53MA4_PACKET_MIN_BIT_LENGTH)
         return DECODE_ABORT_LENGTH;
 
-    // Discard the first 40 bits
-    bitbuffer_extract_bytes(bitbuffer, 0, 40, b, 80);
+    // Check for manufacturer bits anywhere in the packet
+    bitbuffer_extract_bytes(bitbuffer, 0, 0, b, sizeof(b));
+    
+    // Check for the Manufacturer bits with bit shifting
+    uint8_t currentByte = b[0];
+    int byteIndex = -1;
+    int bitIndex = -1;
+
+    for (int i = 0; i < BUFFER_SIZE - 2; i++) {
+        uint8_t nextByte = b[i + 1];
+
+        for (int j = 0; j < 8; j++) {
+            if (currentByte == MFG_BIT_H && nextByte == MFG_BIT_L) {
+                decoder_logf_bitbuffer(decoder, 3, __func__, bitbuffer, "Manufacturer bits found at byte %d, bit %d", i, j);
+                byteIndex = i;
+                bitIndex = j;
+                break;
+            }
+
+            currentByte <<= 1;
+            currentByte |= (nextByte & 0x80) >> 7;
+            nextByte <<= 1;
+        }
+
+        currentByte = b[i + 1];        
+    }
+
+    // Abort if manufacturer bits not found
+    if (byteIndex == -1 || bitIndex == -1) {
+        decoder_log(decoder, 2, __func__, "DECODE_FAIL_SANITY no manufacturer bits");
+        return DECODE_FAIL_SANITY;
+    }
+
+    // Calculate the number of bits remaining
+    int patternBits = byteIndex * 8 + bitIndex;
+    bitCount -= patternBits;
+    
+    // Check if enough remaining bits
+    if (bitCount < EG53MA4_PACKET_MIN_BIT_LENGTH) {
+        decoder_log(decoder, 2, __func__, "DECODE_ABORT_LENGTH 2");
+        return DECODE_ABORT_LENGTH;
+    }
+
+    // Shift the buffer to start at the manufacturer bits
+    bitbuffer_extract_bytes(bitbuffer, 0, patternBits, b, EG53MA4_PACKET_MIN_BIT_LENGTH);
+
+    // Log out dataBuffer bytes
+    decoder_logf_bitbuffer(decoder, 3, __func__, bitbuffer, "Data: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x", b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9]);
 
     // No need to decode/extract values for simple test
     // check serial flags pressure temperature value not zero
@@ -137,14 +202,15 @@ static int schrader_EG53MA4_decode_with_copy(r_device *decoder, bitbuffer_t *bit
     // Calculate the checksum
     checksum = add_bytes(b, 9) & 0xff;
     if (checksum != b[9]) {
+        decoder_logf_bitbuffer(decoder, 2, __func__, bitbuffer, "Checksum mismatch: %02x != %02x", checksum, b[9]);
         return DECODE_FAIL_MIC;
     }
 
     // Copy the data to the buffer
     if (dataBuffer)
     {
-        *pBufferSize = 10;
-        memcpy(dataBuffer, b, 10);
+        *pBufferSize = EG53MA4_PACKET_MIN_BYTE_LENGTH;
+        memcpy(dataBuffer, b, EG53MA4_PACKET_MIN_BYTE_LENGTH);
     }
 
     // Get data
@@ -243,9 +309,12 @@ Example payloads:
 #define NUM_BITS_PRESSURE (10)
 #define NUM_BITS_DATA (NUM_BITS_FLAGS + NUM_BITS_ID + NUM_BITS_PRESSURE)
 #define NUM_BITS_TOTAL (NUM_BITS_PREAMBLE + 2 * NUM_BITS_DATA)
+#define SMD3MA4_PACKET_BYTE_LENGTH 14
 
 static int schrader_SMD3MA4_decode_with_copy(r_device *decoder, bitbuffer_t *bitbuffer, uint8_t* dataBuffer, int* pBufferSize)
 {
+    uint8_t fullBuffer[SMD3MA4_PACKET_BYTE_LENGTH];
+
     // Reject wrong length, with margin of error for extra bits at the end
     if (bitbuffer->bits_per_row[0] < NUM_BITS_TOTAL
             || bitbuffer->bits_per_row[0] >= NUM_BITS_TOTAL + 8) {
@@ -267,6 +336,10 @@ static int schrader_SMD3MA4_decode_with_copy(r_device *decoder, bitbuffer_t *bit
         decoder_log(decoder, 2, __func__, "invalid Manchester data");
         return DECODE_FAIL_MIC;
     }
+
+    // Extract the buffer
+    bitbuffer_extract_bytes(&decoded, 0, 0, fullBuffer, NUM_BITS_TOTAL);
+
     bitbuffer_invert(&decoded);
     b = decoded.bb[0];
 
@@ -293,8 +366,8 @@ static int schrader_SMD3MA4_decode_with_copy(r_device *decoder, bitbuffer_t *bit
     // Copy the data to the buffer
     if (dataBuffer)
     {
-        *pBufferSize = 5;
-        memcpy(dataBuffer, b, 5);
+        *pBufferSize = SMD3MA4_PACKET_BYTE_LENGTH;
+        memcpy(dataBuffer, fullBuffer, SMD3MA4_PACKET_BYTE_LENGTH);
     }
 
     char id_str[9];

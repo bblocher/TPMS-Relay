@@ -134,6 +134,18 @@ rtl_433_ESP::rtl_433_ESP() {
       RECEIVER_BUFFER_SIZE, sizeof(pulse_data_t), MALLOC_CAP_INTERNAL);
 }
 
+// Settings borrowed from lsatan
+void rtl_433_ESP::setRXSettings() {
+  int state = radio.SPIsetRegValue(RADIOLIB_CC1101_REG_AGCCTRL2, 0xc7);
+  RADIOLIB_STATE(state, "set AGCCTRL2");
+
+  state = radio.SPIsetRegValue(RADIOLIB_CC1101_REG_MDMCFG3, 0x93); // Data rate
+  RADIOLIB_STATE(state, "set MDMCFG3");
+
+  state = radio.SPIsetRegValue(RADIOLIB_CC1101_REG_MDMCFG4, 0x07); // Bandwidth
+  RADIOLIB_STATE(state, "set MDMCFG4");
+}
+
 /**
  * @brief Initialize Transceiver and rtl_433 decoders
  * 
@@ -203,16 +215,7 @@ void rtl_433_ESP::initReceiver(byte inputPin, float receiveFrequency) {
     state = radio.SPIsetRegValue(RADIOLIB_CC1101_REG_PKTLEN, 0);
     RADIOLIB_STATE(state, "set PKTLEN");
 
-    // Settings borrowed from lsatan
-
-    state = radio.SPIsetRegValue(RADIOLIB_CC1101_REG_AGCCTRL2, 0xc7);
-    RADIOLIB_STATE(state, "set AGCCTRL2");
-
-    state = radio.SPIsetRegValue(RADIOLIB_CC1101_REG_MDMCFG3, 0x93); // Data rate
-    RADIOLIB_STATE(state, "set MDMCFG3");
-
-    state = radio.SPIsetRegValue(RADIOLIB_CC1101_REG_MDMCFG4, 0x07); // Bandwidth
-    RADIOLIB_STATE(state, "set MDMCFG4");
+    setRXSettings();
   } else {
     // From https://github.com/matthias-bs/BresserWeatherSensorReceiver/issues/41#issuecomment-1458166772
     // radio.begin(868.3, 17.24, 40, 270, 10, 32);
@@ -424,7 +427,8 @@ void rtl_433_ESP::resetReceiver() {
 void rtl_433_ESP::enableReceiver() {
   if (receiverGpio >= 0) {
     pinMode(receiverGpio, INPUT);
-    attachInterrupt((uint8_t)receiverGpio, interruptHandler, CHANGE);
+    flushQueue();
+    attachInterrupt((uint8_t)receiverGpio, interruptHandler, CHANGE);    
     _enabledReceiver = true;
   }
 }
@@ -436,6 +440,7 @@ void rtl_433_ESP::enableReceiver() {
 void rtl_433_ESP::disableReceiver() {
   _enabledReceiver = false;
   detachInterrupt((uint8_t)receiverGpio);
+  flushQueue();
 }
 
 /**
@@ -547,6 +552,11 @@ void rtl_433_ESP::rtl_433_ReceiverTask(void* pvParameters) {
 
 #ifdef AUTORSSITHRESHOLD
         rssiThreshold = averageRssi + rssiThresholdDelta;
+
+        if (rssiThreshold < MINRSSI) {
+          rssiThreshold = MINRSSI;
+        }
+        
         logprintfLn(LOG_DEBUG,
                     "Average RSSI Signal %d dbm, adjusted RSSI Threshold %d, "
                     "samples %d",

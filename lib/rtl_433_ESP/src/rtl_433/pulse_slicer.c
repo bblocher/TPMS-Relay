@@ -30,8 +30,13 @@ bitbuffer_t bits = {0};
 static int account_event_with_copy(r_device* device, bitbuffer_t* bits, u_int8_t* dataBuffer, int* pBufferSize, char const* demod_name) {
   // run decoder
   int ret = 0;
-  if (device->decode_fn) {
-    ret = dataBuffer && device->decode_fn_w_copy ? device->decode_fn_w_copy(device, bits, dataBuffer, pBufferSize) : device->decode_fn(device, bits);
+  
+
+  if (dataBuffer && device->decode_fn_w_copy) {
+    ret = device->decode_fn_w_copy(device, bits, dataBuffer, pBufferSize);
+  }
+  else if (device->decode_fn) {
+    ret = device->decode_fn(device, bits);
   }
 
   // statistics accounting
