@@ -2,6 +2,13 @@
 #include <ArduinoLog.h>
 #include <rtl_433_ESP.h>
 
+#include <AM_ESP32Ble.h>
+
+#include "schraderQueue.h"
+
+/******* Start Global Variable for Widgets *******/
+char deviceName[VALUELEN + 1] = "TPMS_RELAY";
+
 #ifndef RF_MODULE_FREQUENCY
 #  define RF_MODULE_FREQUENCY 433.92
 #endif
@@ -12,13 +19,11 @@
 
 #define JSON_MSG_BUFFER 512
 #define RAW_BUFFER_SIZE 15
-#define MAX_QUEUE_SIZE 50
 
-#define TRANSMISSION_DELAY 10000
-#define RETRANSMISSION_DELAY 1000
-#define RETRANSMISSION_COUNT 5
+#define RETRANSMISSION_DELAY 30000
+#define RETRANSMISSION_COUNT 2 * 30 // 2 transmissions per minute for 30 minutes
 
-#define RADIO_MODE_DELAY 1000
+#define RADIO_MODE_DELAY 100
 
 #define RADIOLIB_STATE(STATEVAR, FUNCTION)                            \
 {                                                                     \
@@ -30,9 +35,18 @@
   }                                                                   \
 }
 
-uint8_t syncWord[] = {0x0, 0x0, 0x0, 0x0, 0x0};
+void doWork();
+void doSync();
+void processIncomingMessages(char *variable, char *value);
+void processOutgoingMessages();
+void processAlarms(char *alarm);
+void deviceConnected();
+
+AMController amController(&doWork, &doSync, &processIncomingMessages, &processOutgoingMessages, &processAlarms, &deviceConnected, NULL);
+
 uint8_t receiveDataBuffer[RAW_BUFFER_SIZE];
-uint8_t receiveQueue[MAX_QUEUE_SIZE][RAW_BUFFER_SIZE];
+uint8_t transmitDataBuffer[RAW_BUFFER_SIZE];
+SchraderQueue schraderQueue(RETRANSMISSION_COUNT, RETRANSMISSION_DELAY);
 
 char messageBuffer[JSON_MSG_BUFFER];
 
@@ -41,9 +55,8 @@ int lastTransmission = millis();
 int lastReceived = millis();
 
 volatile bool transmitting = false;
-volatile int retransmissionCount = 0;
-volatile int receiveQueueIndex = 0;
-volatile int transmitQueueIndex = 0;
+volatile bool dataChanged = false;
+volatile int transmitCount = 0;
 
 rtl_433_ESP rf;
 
@@ -54,7 +67,6 @@ void transmitHandler() {
   int state = rf.getRadio().finishTransmit();
   RADIOLIB_STATE(state, "finishTransmit");
   
-  //Log.verbose(F("Transmission complete" CR));
   transmitting = false;
   lastRetransmission = millis();
 }
@@ -64,7 +76,7 @@ void relay(uint8_t* data, int dataSize) {
   
   Log.verbose(F("Sending data (%d bytes): " CR), dataSize);
   for (int i = 0; i < dataSize; i++) {
-    Log.verbose(F("%d "), data[i]);
+    Log.verbose("%X ", data[i]);
   }
   Log.verbose(F(CR));
   
@@ -90,17 +102,9 @@ void rtl_433_Callback(char* message, uint8_t* data, int dataSize) {
   logJson(RFrtl_433_ESPdata);
   #endif
 
-  // Abort if queue is full
-  if (receiveQueueIndex == MAX_QUEUE_SIZE) {
-    Log.warning(F("Queue is full, aborting" CR));
-    return;
-  }
+  Log.notice(F("Received data (%d bytes): " CR), dataSize);
   
-  // Copy the sync word to the transmit buffer
-  memccpy(receiveQueue[receiveQueueIndex], syncWord, sizeof(syncWord), RAW_BUFFER_SIZE);
-
-  // Copy the data to the transmit buffer
-  memccpy(receiveQueue[receiveQueueIndex++] + sizeof(syncWord), data, dataSize, RAW_BUFFER_SIZE);
+  schraderQueue.addOrUpdateEntry(data);
 }
 
 void setupTx() {
@@ -144,7 +148,8 @@ void setup() {
   RADIOLIB_STATE(state, "begin");
   
   setupRx();
-    
+
+  amController.begin(deviceName);  
   Log.notice(F("****** setup complete ******" CR));
 }
 
@@ -173,50 +178,82 @@ void setModeRx() {
 
 void transmitLoop() {
   // Check if we should transmit
-  if (receiveQueueIndex == MAX_QUEUE_SIZE || millis() - lastTransmission > TRANSMISSION_DELAY) {
-    if (!transmitting)
-    {
-      if (millis() - lastRetransmission < RETRANSMISSION_DELAY)
-        return;
-      
-      Log.verbose(F("Checking for data to transmit" CR));
-      
-      if (transmitQueueIndex < receiveQueueIndex) {
-        // If first packet
-        if (transmitQueueIndex == 0)
-          setModeTx();
+  if (schraderQueue.getNextEntryToRetransmit(transmitDataBuffer, (time_t) millis())) {
+    // If first packet
+    if (transmitCount == 0)
+      setModeTx();
 
-        // Transmit the data
-        Log.notice(F("Retransmitting %d of %d packets. Retry %d of %d" CR), transmitQueueIndex + 1, receiveQueueIndex, retransmissionCount + 1, RETRANSMISSION_COUNT);
-        relay(receiveQueue[transmitQueueIndex], RAW_BUFFER_SIZE);
-        
-        // Track total retransmissions
-        retransmissionCount++;
-        if(retransmissionCount == RETRANSMISSION_COUNT) {
-          retransmissionCount = 0;
-          transmitQueueIndex++;
-        } 
-      }
-      // Check if we have transmitted all packets
-      else if (transmitQueueIndex == receiveQueueIndex && receiveQueueIndex > 0) {
-        transmitQueueIndex = 0;
-        receiveQueueIndex = 0;
-
-        Log.notice(F("All packets transmitted. Reinitalizing receiver." CR));
-                
-        setModeRx();
-        lastTransmission = millis();
-      }
-      else {
-        Log.verbose(F("No data to transmit" CR));
-        lastTransmission = millis();
-      }
+    // Transmit the data
+    relay(transmitDataBuffer, RAW_BUFFER_SIZE);
+    
+    transmitCount++;
+    dataChanged = true;
+  }
+  // Check if we have transmitted all packets
+  else {
+    if (transmitCount > 0) {
+      transmitCount = 0;
+      Log.notice(F("All packets transmitted. Reinitalizing receiver." CR));
+            
+      setModeRx();
+      dataChanged = true;
     }
+  }
+}
+
+void sendDataToManager() {
+  // Send data to Arduino Manager
+  amController.writeMessage("queueSize", schraderQueue.getQueueSize());
+
+  // Iterate through the queue and send the data
+  for (int i = 0; i < schraderQueue.getQueueSize(); i++) {
+    std::string identifier = "tire" + std::to_string(i + 1);
+    amController.writeTxtMessage(identifier.c_str(), schraderQueue.formatEntry(i).c_str());
+  }
+
+  // Clear out any old data
+  for (int i = schraderQueue.getQueueSize(); i < 12; i++) {
+    std::string identifier = "tire" + std::to_string(i + 1);
+    amController.writeTxtMessage(identifier.c_str(), "N/A");
   }
 }
 
 void loop() {
   transmitLoop();  
   rf.loop();
+  amController.loop();
+
+  if (dataChanged) {
+    sendDataToManager();
+    dataChanged = false;
+  }
+
   delay(1);
+}
+
+void doWork() {
+}
+
+void doSync() {
+  Log.notice(F("Synchronizing" CR));
+
+  sendDataToManager();
+}
+
+void processIncomingMessages(char *variable, char *value) {
+  Log.notice(F("Process Incoming" CR));
+}
+
+void processOutgoingMessages() {
+  // amController.writeMessage("KA", data++);
+  // // Write a console log to Arduino Manager
+  // amController.log
+  // amController.logLn(data);
+}
+
+void processAlarms(char *alarm) {
+}
+
+void deviceConnected() {
+  Log.notice(F("Device connected" CR));
 }
